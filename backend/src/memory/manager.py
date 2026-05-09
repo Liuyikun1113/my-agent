@@ -11,6 +11,8 @@ from backend.src.memory.interfaces.memory_store import MemoryStore
 from backend.src.memory.interfaces.memory_item import MemoryItem
 from backend.src.api.schemas.session import SessionResponse
 from backend.src.api.schemas.chat import MessageResponse
+from backend.src.utils.async_utils import retry_async, timeout_async
+from backend.src.utils.helpers import truncate_text, safe_get
 
 logger = logging.getLogger(__name__)
 
@@ -361,10 +363,16 @@ class MemoryManager:
             # 保存到长期记忆 (MySQL, 同步写入 — source of truth)
             await self.long_term_store.save(message_item)
 
-            # 保存到短期记忆 (Redis 列表, 最近10条, 容错)
+            # 保存到短期记忆 (Redis 列表, 最近10条, 容错+轻量重试)
             try:
-                await self.short_term_store.push_to_session_list(
-                    session_id, message_data, max_len=10
+                await retry_async(
+                    self.short_term_store.push_to_session_list,
+                    max_attempts=2,
+                    backoff_factor=1.0,
+                    exceptions=(Exception,),
+                    session_id=session_id,
+                    message_data=message_data,
+                    max_len=10,
                 )
             except Exception as e:
                 logger.warning(f"Redis写入失败 (消息仍已持久化到MySQL): {e}")
@@ -632,11 +640,15 @@ class MemoryManager:
             if not self._initialized:
                 await self.initialize()
 
-            # 从向量记忆搜索
-            results = await self.vector_store.search(
-                query=query,
-                filters={"session_id": session_id},
-                limit=limit,
+            # 从向量记忆搜索（带超时保护）
+            results = await timeout_async(
+                self.vector_store.search(
+                    query=query,
+                    filters={"session_id": session_id},
+                    limit=limit,
+                ),
+                timeout=5.0,
+                default=[],
             )
 
             # 转换为消息响应
@@ -686,13 +698,20 @@ class MemoryManager:
             relevant_summaries = []
             if current_query:
                 try:
-                    results = await self.vector_store.search(
-                        query=current_query,
-                        filters={"session_id": session_id, "type": "summary"},
-                        limit=summary_limit,
+                    results = await timeout_async(
+                        self.vector_store.search(
+                            query=current_query,
+                            filters={"session_id": session_id, "type": "summary"},
+                            limit=summary_limit,
+                        ),
+                        timeout=3.0,
+                        default=[],
                     )
                     for r in results:
-                        summary_data = r.data if isinstance(r, MemoryItem) else r.get("data", {})
+                        summary_data = (
+                            r.data if isinstance(r, MemoryItem)
+                            else safe_get(r, "data", default={})
+                        )
                         relevant_summaries.append(summary_data)
                 except Exception as e:
                     logger.warning(f"Milvus 摘要检索失败: {e}")
@@ -763,19 +782,29 @@ class MemoryManager:
                     )
 
             summary_count = sum(1 for i in compressed if i.type == "summary")
+            sample_text = truncate_text(
+                messages[-1].get_data_field("content") if messages else "", 100
+            )
             logger.info(
                 f"会话 {session_id} 压缩完成: "
-                f"原始 {len(messages)} 条 → {summary_count} 条摘要写入 Milvus"
+                f"原始 {len(messages)} 条 → {summary_count} 条摘要写入 Milvus, "
+                f"最近消息: {sample_text}"
             )
         except Exception as e:
             logger.warning(f"后台压缩检查失败 (会话 {session_id}): {e}")
 
     async def _async_save_summary_to_vector(self, summary_item: MemoryItem):
         """
-        异步将摘要写入 Milvus（后台任务）
+        异步将摘要写入 Milvus（后台任务，轻量重试）
         """
         try:
-            await self.vector_store.save(summary_item)
+            await retry_async(
+                self.vector_store.save,
+                max_attempts=2,
+                backoff_factor=1.0,
+                exceptions=(Exception,),
+                summary_item,
+            )
         except Exception as e:
             logger.error(f"摘要写入 Milvus 失败: {e}")
 

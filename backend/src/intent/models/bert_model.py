@@ -152,23 +152,36 @@ class BERTModel:
         return results
 
     def _placeholder_predict(self, text: str) -> Tuple[str, float]:
-        """占位预测逻辑"""
-        text_lower = text.lower()
+        """占位预测逻辑 — 使用 extract_keywords 提取关键词后匹配意图"""
+        from backend.src.utils.helpers import extract_keywords
 
-        rules = [
-            (["研究", "搜索", "查询", "find", "research", "search"], "research", 0.82),
-            (["代码", "编程", "开发", "code", "program", "write"], "coding", 0.87),
-            (["工具", "执行", "运行", "tool", "execute", "run"], "tool_usage", 0.76),
-            (["计划", "任务", "规划", "plan", "task", "todo"], "planning", 0.72),
-            (["分析", "计算", "统计", "analyze", "calculate"], "analysis", 0.79),
+        keywords = set(extract_keywords(text, max_keywords=10, min_length=2))
+
+        intent_rules = [
+            ("research", {"研究", "搜索", "查询", "find", "research", "search", "调查", "资料", "文献", "论文", "数据"}),
+            ("coding", {"代码", "编程", "开发", "code", "program", "write", "implement", "函数", "bug", "调试", "算法", "类", "接口"}),
+            ("tool_usage", {"工具", "执行", "运行", "tool", "execute", "run", "调用", "使用", "计算"}),
+            ("planning", {"计划", "任务", "规划", "plan", "task", "todo", "安排", "日程", "待办"}),
+            ("analysis", {"分析", "计算", "统计", "analyze", "calculate", "评估", "比较", "总结", "报告"}),
         ]
 
-        for keywords, intent, base_confidence in rules:
-            if any(kw in text_lower for kw in keywords):
-                confidence = min(0.95, base_confidence + np.random.uniform(-0.05, 0.05))
-                return intent, confidence
+        best_intent = "general_chat"
+        best_score = 0.0
 
-        return "general_chat", min(0.65, 0.55 + np.random.uniform(-0.05, 0.05))
+        for intent, intent_keywords in intent_rules:
+            overlap = keywords & intent_keywords
+            if overlap:
+                score = len(overlap) / len(intent_keywords)
+                if score > best_score:
+                    best_score = score
+                    best_intent = intent
+
+        if best_intent != "general_chat":
+            confidence = min(0.95, 0.65 + best_score * 0.3 + np.random.uniform(-0.05, 0.05))
+        else:
+            confidence = min(0.65, 0.50 + np.random.uniform(-0.05, 0.05))
+
+        return best_intent, confidence
 
     async def encode(
         self, texts: List[str], pooling: str = "mean"

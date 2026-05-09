@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
 
-from api.schemas.chat import (
+from backend.src.api.schemas.chat import (
     MessageCreate,
     MessageResponse,
     ChatRequest,
@@ -16,11 +16,13 @@ from api.schemas.chat import (
     ToolCallRequest,
     ToolCallResponse,
 )
-from api.middleware.auth import get_current_user_optional
-from memory.manager import memory_manager
-from agents.registry import agent_registry
-from tools.registry import tool_registry
-from sse.sse_manager import sse_manager, EventType
+from backend.src.api.middleware.auth import get_current_user_optional
+from backend.src.memory.manager import memory_manager
+from backend.src.agents.registry import agent_registry
+from backend.src.tools.registry import tool_registry
+from backend.src.sse.sse_manager import sse_manager, EventType
+from backend.src.utils.validation import validate_session_id, sanitize_input
+from backend.src.utils.helpers import truncate_text
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -54,6 +56,8 @@ async def create_message(
         MessageResponse: 创建的消息
     """
     try:
+        if not validate_session_id(session_id):
+            raise HTTPException(status_code=400, detail="无效的会话ID格式")
         session = await verify_session_access(session_id, user_id)
 
         # 验证父消息（如果提供）
@@ -111,6 +115,8 @@ async def get_messages(
         PaginatedMessages: 分页消息列表
     """
     try:
+        if not validate_session_id(session_id):
+            raise HTTPException(status_code=400, detail="无效的会话ID格式")
         session = await verify_session_access(session_id, user_id)
 
         # 获取消息
@@ -183,13 +189,20 @@ async def chat(
         ChatResponse: 聊天响应
     """
     try:
+        if not validate_session_id(session_id):
+            raise HTTPException(status_code=400, detail="无效的会话ID格式")
         session = await verify_session_access(session_id, user_id)
+
+        # 清洗用户输入
+        cleaned_message, warnings = sanitize_input(chat_request.message)
+        if warnings:
+            logger.warning(f"消息清洗警告: {warnings} | 原文: {truncate_text(chat_request.message, 100)}")
 
         # 创建用户消息
         user_message = await memory_manager.save_message(
             session_id=session_id,
             role="user",
-            content=chat_request.message,
+            content=cleaned_message,
         )
 
         # 如果是流式响应，返回流式响应

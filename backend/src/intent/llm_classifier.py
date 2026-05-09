@@ -102,6 +102,7 @@ class LLMIntentClassifier(BaseIntentClassifier):
     ) -> IntentResult:
         """使用LLM API进行分类"""
         import json
+        from backend.src.utils.async_utils import timeout_async
 
         categories = list(self.categories.keys()) if self.categories else [
             "general_chat", "research", "coding", "tool_usage", "planning"
@@ -113,7 +114,7 @@ class LLMIntentClassifier(BaseIntentClassifier):
             text=text,
         )
 
-        try:
+        async def _call_llm():
             if self.provider == "openai":
                 response = await self.llm_client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
@@ -124,7 +125,7 @@ class LLMIntentClassifier(BaseIntentClassifier):
                     temperature=0.1,
                     max_tokens=200,
                 )
-                content = response.choices[0].message.content
+                return response.choices[0].message.content
             elif self.provider == "anthropic":
                 response = await self.llm_client.messages.create(
                     model=settings.ANTHROPIC_MODEL,
@@ -132,8 +133,12 @@ class LLMIntentClassifier(BaseIntentClassifier):
                     temperature=0.1,
                     messages=[{"role": "user", "content": prompt}],
                 )
-                content = response.content[0].text
-            else:
+                return response.content[0].text
+
+        try:
+            content = await timeout_async(_call_llm(), timeout=5.0, default=None)
+            if content is None:
+                logger.warning("LLM API 超时 (5s)，降级到规则分类")
                 return await self._classify_with_rules(text)
 
             # 解析JSON响应
