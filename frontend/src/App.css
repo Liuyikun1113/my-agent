@@ -1,0 +1,142 @@
+/* App-level styles */
+
+/* Smooth scrolling for chat messages */
+.message-container {
+  scroll-behavior: smooth;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(0, 0, 0, 0.25);
+}
+
+/* Markdown content styling */
+.markdown-content pre {
+  background-color: #f5f5f5;
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.markdown-content code {
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+  font-size: 0.85em;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background-color: rgba(0, 0, 0, 0.06);
+}
+
+.markdown-content pre code {
+  padding: 0;
+  background-color: transparent;
+}
+
+.markdown-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+}
+
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid #e0e0e0;
+  padding: 6px 12px;
+  text-align: left;
+}
+
+.markdown-content th {
+  background-color: #f5f5f5;
+  font-weight: 600;
+}
+
+.markdown-content blockquote {
+  border-left: 3px solid #1976d2;
+  padding-left: 12px;
+  margin: 8px 0;
+  color: #666;
+}
+
+/* Animation for new messages */
+@keyframes messageSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message-enter {
+  animation: messageSlideIn 0.25s ease-out;
+}
+
+/* Typing cursor animation */
+@keyframes blinkCursor {
+  50% {
+    border-right-color: transparent;
+  }
+}
+
+.typing-cursor::after {
+  content: '';
+  border-right: 2px solid #1976d2;
+  animation: blinkCursor 0.8s infinite;
+}
+
+/* Sidebar transition */
+.sidebar-transition {
+  transition: width 0.3s ease;
+}
+
+/* Pulse animation for status indicators */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.status-pulse {
+  animation: pulse 2s infinite;
+}
+
+/* Focus mode chat */
+.chat-focus {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+/* Mobile responsiveness */
+@media (max-width: 600px) {
+  .hide-on-mobile {
+    display: none !important;
+  }
+}
+
+/* Print styles */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+}
