@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
 
-from backend.src.api.schemas.chat import (
+from api.schemas.chat import (
     MessageCreate,
     MessageResponse,
     ChatRequest,
@@ -16,13 +16,13 @@ from backend.src.api.schemas.chat import (
     ToolCallRequest,
     ToolCallResponse,
 )
-from backend.src.api.middleware.auth import get_current_user_optional
-from backend.src.memory.manager import memory_manager
-from backend.src.agents.registry import agent_registry
-from backend.src.tools.registry import tool_registry
-from backend.src.sse.sse_manager import sse_manager, EventType
-from backend.src.utils.validation import validate_session_id, sanitize_input
-from backend.src.utils.helpers import truncate_text
+from api.middleware.auth import get_current_user_optional
+from memory.manager import memory_manager
+from agents.registry import agent_registry
+from tools.registry import tool_registry
+from sse.sse_manager import sse_manager, EventType
+from utils.validation import validate_session_id, sanitize_input
+from utils.helpers import truncate_text
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -205,21 +205,39 @@ async def chat(
             content=cleaned_message,
         )
 
-        # 如果是流式响应，返回流式响应
+        # 如果是流式响应，通过后台任务处理并返回
         if chat_request.stream:
+            background_tasks.add_task(
+                process_user_message,
+                session_id=session_id,
+                message_id=user_message.id,
+            )
             return ChatResponse(
                 message=user_message,
                 is_streaming=True,
                 stream_token=f"stream_{session_id}_{user_message.id}",
             )
 
-        # 同步处理：获取智能体响应
-        # 这里应该调用智能体协调器处理消息
-        # 暂时返回一个占位响应
+        # 同步处理：调用智能体协调器处理消息
+        from backend.src.agents.orchestrator import agent_orchestrator
+        agent, route_info = await agent_orchestrator.route_to_agent(
+            session_id=session_id,
+            message_content=cleaned_message,
+        )
+        if agent:
+            result = await agent.process_message(
+                session_id=session_id,
+                message_id=user_message.id,
+                message_content=cleaned_message,
+            )
+            response_content = result.get("response", str(result))
+        else:
+            response_content = "抱歉，当前没有可用的智能体来处理您的请求。"
+
         assistant_message = await memory_manager.save_message(
             session_id=session_id,
             role="assistant",
-            content="这是一个占位响应，智能体功能待实现",
+            content=response_content,
             parent_message_id=user_message.id,
         )
 
@@ -292,9 +310,15 @@ async def process_user_message(session_id: str, message_id: str):
             return
 
         # 1. 意图识别
-        # TODO: 调用意图分类器
-        # 暂时使用简单逻辑
-        intent = "general_chat"
+        from backend.src.intent.classifier import intent_classifier
+        try:
+            intent_result = await intent_classifier.classify(message.content)
+            intent = intent_result.intent
+            confidence = intent_result.confidence
+        except Exception as e:
+            logger.warning(f"意图识别失败: {e}, 使用默认意图")
+            intent = "general_chat"
+            confidence = 0.5
 
         # 发送意图识别事件
         await sse_manager.send_to_session(
@@ -304,44 +328,92 @@ async def process_user_message(session_id: str, message_id: str):
                 "session_id": session_id,
                 "message_id": message_id,
                 "intent": intent,
-                "confidence": 1.0,
+                "confidence": confidence,
             },
             event_id=f"intent_{message_id}",
         )
 
-        # 2. 路由到对应智能体
-        # TODO: 根据意图路由到相应智能体
-        # 暂时使用通用智能体
-
-        # 3. 获取智能体响应
-        # TODO: 调用智能体处理消息
-        # 暂时生成模拟响应
-        response_content = f"这是对您消息的模拟响应: '{message.content[:50]}...'"
-
-        # 4. 保存智能体响应
-        assistant_message = await memory_manager.save_message(
+        # 2. 路由到对应智能体并流式获取响应
+        from backend.src.agents.orchestrator import agent_orchestrator
+        agent, route_info = await agent_orchestrator.route_to_agent(
             session_id=session_id,
-            role="assistant",
-            content=response_content,
-            parent_message_id=message_id,
+            message_content=message.content,
+            intent=intent,
         )
 
-        # 5. 通过SSE推送响应到会话
-        await sse_manager.send_to_session(
+        if not agent:
+            response_content = "抱歉，当前没有可用的智能体来处理您的请求。"
+            assistant_message = await memory_manager.save_message(
+                session_id=session_id,
+                role="assistant",
+                content=response_content,
+                parent_message_id=message_id,
+            )
+            await sse_manager.send_to_session(
+                session_id=session_id,
+                event_type=EventType.CHAT_MESSAGE,
+                data={
+                    "session_id": session_id,
+                    "message": {
+                        "id": assistant_message.id,
+                        "role": "assistant",
+                        "content": response_content,
+                        "timestamp": assistant_message.created_at.isoformat() if hasattr(assistant_message, 'created_at') else datetime.now().isoformat(),
+                        "parent_message_id": message_id,
+                    }
+                },
+                event_id=f"message_{assistant_message.id}",
+            )
+            return
+
+        # 流式消费 Agent 输出
+        full_content = ""
+        metadata = {}
+        async for chunk in agent.stream_response(
             session_id=session_id,
-            event_type=EventType.CHAT_MESSAGE,
-            data={
-                "session_id": session_id,
-                "message": {
-                    "id": assistant_message.id,
-                    "role": "assistant",
-                    "content": response_content,
-                    "timestamp": assistant_message.created_at.isoformat() if hasattr(assistant_message, 'created_at') else datetime.now().isoformat(),
-                    "parent_message_id": message_id,
-                }
-            },
-            event_id=f"message_{assistant_message.id}",
-        )
+            message_id=message_id,
+            message_content=message.content,
+        ):
+            delta = chunk.get("delta", "")
+            full_content += delta
+
+            if chunk.get("done"):
+                full_response = chunk.get("full_response", full_content)
+                metadata = chunk.get("metadata", {})
+
+                assistant_message = await memory_manager.save_message(
+                    session_id=session_id,
+                    role="assistant",
+                    content=full_response,
+                    parent_message_id=message_id,
+                )
+                await sse_manager.send_to_session(
+                    session_id=session_id,
+                    event_type=EventType.CHAT_MESSAGE,
+                    data={
+                        "session_id": session_id,
+                        "message": {
+                            "id": assistant_message.id,
+                            "role": "assistant",
+                            "content": full_response,
+                            "timestamp": assistant_message.created_at.isoformat() if hasattr(assistant_message, 'created_at') else datetime.now().isoformat(),
+                            "parent_message_id": message_id,
+                            "metadata": metadata.get("metadata"),
+                        }
+                    },
+                    event_id=f"message_{assistant_message.id}",
+                )
+            else:
+                await sse_manager.send_to_session(
+                    session_id=session_id,
+                    event_type=EventType.CHAT_DELTA,
+                    data={
+                        "session_id": session_id,
+                        "message_id": message_id,
+                        "delta": delta,
+                        "is_streaming": True,
+                    },
+                )
 
         logger.info(f"用户消息处理完成: session={session_id}, message={message_id}")
 
